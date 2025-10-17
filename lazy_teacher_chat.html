@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tutor de Inglés IA "Lazy Teacher"</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Carga de Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Custom scrollbar for chat history */
+        #chat-history::-webkit-scrollbar {
+            width: 8px;
+        }
+        #chat-history::-webkit-scrollbar-thumb {
+            background-color: #9ca3af; /* gray-400 */
+            border-radius: 20px;
+        }
+        #chat-history::-webkit-scrollbar-track {
+            background-color: #f3f4f6; /* gray-100 */
+        }
+        /* Inter font for modern look */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #e5e7eb;
+        }
+        /* Style for the loading animation */
+        .dot-flashing {
+            position: relative;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background-color: #6366f1; /* indigo-500 */
+            color: #6366f1;
+            animation: dotFlashing 1s infinite linear alternate;
+            animation-delay: 0.5s;
+        }
+        .dot-flashing::before, .dot-flashing::after {
+            content: '';
+            display: inline-block;
+            position: absolute;
+            top: 0;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background-color: #6366f1;
+            color: #6366f1;
+            animation: dotFlashing 1s infinite linear alternate;
+        }
+        .dot-flashing::before {
+            left: -15px;
+            animation-delay: 0s;
+        }
+        .dot-flashing::after {
+            left: 15px;
+            animation-delay: 1s;
+        }
+        @keyframes dotFlashing {
+            0% { background-color: #6366f1; }
+            50%, 100% { background-color: #a5b4fc; /* indigo-200 */ }
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+
+    <!-- Main Chat Container -->
+    <div class="w-full max-w-lg bg-white shadow-2xl rounded-xl flex flex-col h-[80vh] min-h-[500px]">
+
+        <!-- Header -->
+        <header class="p-4 bg-indigo-600 text-white rounded-t-xl shadow-lg flex items-center justify-between">
+            <div class="flex items-center">
+                <i data-lucide="book-open-text" class="w-6 h-6 mr-3"></i>
+                <h1 class="text-xl font-bold">Lazy Teacher AI Tutor</h1>
+            </div>
+            <div class="flex items-center space-x-3">
+                <button id="quiz-button" onclick="generateQuiz()" class="bg-indigo-700 hover:bg-indigo-800 text-white text-sm font-semibold px-3 py-1 rounded-full shadow transition duration-150 transform active:scale-95 disabled:opacity-50" title="Generar Examen Rápido">
+                    ✨ Crear Examen
+                </button>
+                <div id="user-info" class="text-xs opacity-75 hidden sm:block">
+                    <!-- El ID de usuario se mostrará aquí -->
+                </div>
+            </div>
+        </header>
+
+        <!-- Chat History -->
+        <div id="chat-history" class="flex-grow p-4 overflow-y-auto space-y-4">
+            <!-- Mensaje de bienvenida inicial cargado por JS -->
+        </div>
+
+        <!-- Loading Indicator -->
+        <div id="loading-indicator" class="hidden p-3 flex justify-start">
+            <div class="bg-gray-200 p-3 rounded-xl rounded-bl-none max-w-[80%] shadow-md flex items-center">
+                <div class="dot-flashing"></div>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="p-4 border-t border-gray-200 flex items-center space-x-3 rounded-b-xl">
+            <input type="text" id="user-input" placeholder="Haz tu pregunta en inglés..." class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150" onkeydown="if(event.key === 'Enter') sendMessage()">
+            <button id="send-button" onclick="sendMessage()" class="bg-indigo-600 hover:bg-indigo-700 text-white p-3 rounded-lg shadow-md transition duration-150 transform active:scale-95 disabled:opacity-50">
+                <i data-lucide="send" class="w-5 h-5"></i>
+            </button>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- Imports ---
+        // FIX: Se elimina la importación de módulo para 'createIcons' ya que no es una exportación nombrada.
+        // Ahora se llama a la función globalmente, ya que la librería se carga en el <head>
+        
+        // --- Firebase Imports ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, orderBy, limit, onSnapshot, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Global Firebase and App State ---
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false; 
+
+        // --- Environment Variables (Mandatory for Canvas) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : '';
+
+        // --- UI Elements ---
+        const chatHistory = document.getElementById('chat-history');
+        const userInput = document.getElementById('user-input');
+        const sendButton = document.getElementById('send-button');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const userInfo = document.getElementById('user-info');
+        const quizButton = document.getElementById('quiz-button');
+        
+        // --- API Configuration ---
+        const apiKey = ""; // Leave blank, runtime environment provides it.
+        const geminiFlashUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        const geminiTtsUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+        
+        // NOTE: The system prompt remains in English as it dictates the LLM's persona and output language.
+        // **ACTUALIZACIÓN**: Se ha añadido una instrucción para que el LLM nunca mencione detalles técnicos.
+        const LLM_SYSTEM_PROMPT = "You are 'Lazy Teacher,' a friendly, helpful, and concise English language tutor. Your primary goal is to provide clear educational explanations, definitions, and short, correct example sentences in response to user questions about grammar, vocabulary, or general knowledge. If the user asks for a direct translation, perform the translation. Keep your responses direct and encouraging. Always provide an example when explaining a concept. IMPORTANT: Never mention model names, APIs, version numbers, or internal technical details in your response.";
+
+        // --- Firebase Initialization and Auth ---
+        function initFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                console.log("Firebase Initialized.");
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        // Traducido a español
+                        userInfo.textContent = `ID de Usuario: ${userId}`; 
+                        isAuthReady = true;
+                        console.log("User Authenticated:", userId);
+                        setupChatListener();
+                    } else {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase or signing in:", error);
+                // Traducido a español
+                userInfo.textContent = "Error de Autenticación!"; 
+            }
+        }
+
+        // --- Firestore Chat Listener ---
+        function setupChatListener() {
+            if (!db || !userId) return;
+            
+            // Path: /artifacts/{appId}/users/{userId}/messages
+            const chatCollectionPath = `/artifacts/${appId}/users/${userId}/messages`;
+            const q = query(
+                collection(db, chatCollectionPath),
+                orderBy('timestamp', 'asc'), 
+                limit(50) 
+            );
+
+            onSnapshot(q, (snapshot) => {
+                chatHistory.innerHTML = ''; 
+                addWelcomeMessage();
+                
+                snapshot.forEach((doc) => {
+                    const message = doc.data();
+                    if (message.sender === 'user' || message.sender === 'ai' || message.sender === 'quiz') {
+                         addMessageToDOM(message.text, message.sender, message.sources || [], message.quizData);
+                    }
+                });
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+            }, (error) => {
+                console.error("Error listening to chat history:", error);
+            });
+        }
+
+        // Traducido a español
+        function addWelcomeMessage() {
+            const welcomeDiv = document.createElement('div');
+            welcomeDiv.className = 'flex justify-start';
+            welcomeDiv.innerHTML = `
+                <div class="bg-indigo-100 text-indigo-800 p-3 rounded-xl rounded-bl-none max-w-[80%] shadow-md">
+                    <p class="font-semibold flex items-center">
+                        <i data-lucide="sparkles" class="w-4 h-4 mr-1 text-indigo-500"></i> Profesor Perezoso (Lazy Teacher)
+                    </p>
+                    <p class="mt-1">¡Hola! Soy tu amigable tutor de inglés. Pregúntame sobre gramática, vocabulario, o pídeme traducir algo. Por ejemplo: "¿Cuál es el pasado simple de 'run'?"</p>
+                </div>
+            `;
+            chatHistory.appendChild(welcomeDiv);
+            if (typeof createIcons !== 'undefined') createIcons();
+        }
+
+        /**
+         * Renders a message bubble to the chat history.
+         */
+        function addMessageToDOM(text, sender, sources = [], quizData = null, shouldScroll = true) {
+            const container = document.createElement('div');
+            const bubble = document.createElement('div');
+
+            const isUser = sender === 'user';
+            const isQuiz = sender === 'quiz';
+            container.className = isUser ? 'flex justify-end' : 'flex justify-start';
+
+            bubble.className = isUser
+                ? 'bg-indigo-600 text-white p-3 rounded-xl rounded-br-none max-w-[80%] shadow-md'
+                : 'bg-indigo-100 text-indigo-800 p-3 rounded-xl rounded-bl-none max-w-[80%] shadow-md';
+
+            if (!isUser) {
+                const header = document.createElement('p');
+                header.className = 'font-semibold flex items-center';
+                header.innerHTML = isQuiz 
+                    ? `<i data-lucide="trophy" class="w-4 h-4 mr-1 text-yellow-600"></i> ¡HORA DEL EXAMEN!` // Traducido
+                    : `<i data-lucide="sparkles" class="w-4 h-4 mr-1 text-indigo-500"></i> Profesor Perezoso`; // Traducido
+                bubble.appendChild(header);
+            }
+
+            if (isQuiz && quizData) {
+                displayQuiz(bubble, quizData);
+            } else {
+                const messageContainer = document.createElement('div');
+                messageContainer.className = 'flex items-start';
+                
+                const messageText = document.createElement('p');
+                messageText.className = isUser ? 'mt-0' : 'mt-1 whitespace-pre-wrap flex-grow';
+                messageText.textContent = text;
+                messageContainer.appendChild(messageText);
+
+                if (!isUser) {
+                    const ttsButton = document.createElement('button');
+                    ttsButton.className = 'ml-2 text-indigo-500 hover:text-indigo-700 focus:outline-none transition duration-150 transform active:scale-95 disabled:opacity-50';
+                    ttsButton.onclick = (e) => {
+                        e.stopPropagation(); // Prevent issues if bubble is clickable later
+                        speakText(text, ttsButton);
+                    };
+                    ttsButton.innerHTML = `<i data-lucide="volume-2" class="w-4 h-4"></i>`;
+                    messageContainer.appendChild(ttsButton);
+                }
+
+                bubble.appendChild(messageContainer);
+            }
+
+
+            // Add sources if available (only for non-quiz AI messages)
+            if (sources.length > 0 && !isUser && !isQuiz) {
+                const sourceDiv = document.createElement('div');
+                sourceDiv.className = 'mt-2 pt-2 border-t border-indigo-200 text-xs text-indigo-600 italic';
+                // Traducido a español
+                sourceDiv.innerHTML = 'Fuentes: ' + sources.map((s, index) =>
+                    `<a href="${s.uri}" target="_blank" class="hover:underline">${s.title ? s.title.substring(0, 30) : 'Fuente'}...</a>`
+                ).join(', ');
+                bubble.appendChild(sourceDiv);
+            }
+
+            container.appendChild(bubble);
+            chatHistory.appendChild(container);
+            
+            if (shouldScroll) {
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+            }
+            if (typeof createIcons !== 'undefined') createIcons();
+        }
+
+        // --- Quiz Display Logic ---
+        function displayQuiz(bubble, quiz) {
+            const quizContainer = document.createElement('div');
+            quizContainer.className = 'space-y-4 pt-2';
+            
+            quiz.forEach((q, index) => {
+                const questionDiv = document.createElement('div');
+                questionDiv.className = 'border-b border-indigo-300 pb-2 last:border-b-0';
+                
+                const qText = document.createElement('p');
+                qText.className = 'font-bold text-indigo-900 mb-2';
+                qText.textContent = `${index + 1}. (${q.type}) ${q.question}`;
+                questionDiv.appendChild(qText);
+
+                const answerBtn = document.createElement('button');
+                answerBtn.textContent = 'Mostrar Respuesta';
+                answerBtn.className = 'text-xs bg-indigo-200 hover:bg-indigo-300 text-indigo-800 px-2 py-1 rounded-full transition duration-150';
+                answerBtn.onclick = () => {
+                    const answerDiv = document.createElement('p');
+                    answerDiv.className = 'mt-1 text-sm text-green-700 font-semibold';
+                    answerDiv.innerHTML = `**Respuesta:** ${q.answer}`;
+                    questionDiv.insertBefore(answerDiv, answerBtn);
+                    answerBtn.remove();
+                };
+                questionDiv.appendChild(answerBtn);
+
+                quizContainer.appendChild(questionDiv);
+            });
+            bubble.appendChild(quizContainer);
+        }
+
+        // --- Storage Logic ---
+        async function saveMessage(text, sender, sources = [], quizData = null) {
+            if (!isAuthReady || !db || !userId) {
+                console.error("Firebase not ready to save message.");
+                return;
+            }
+            try {
+                const chatCollectionPath = `/artifacts/${appId}/users/${userId}/messages`;
+                await addDoc(collection(db, chatCollectionPath), {
+                    text: text,
+                    sender: sender,
+                    sources: sources,
+                    quizData: quizData,
+                    timestamp: serverTimestamp(),
+                });
+            } catch (error) {
+                console.error("Error saving message to Firestore:", error);
+            }
+        }
+
+        // --- API & Core Functionality ---
+
+        async function fetchWithBackoff(url, payload, retries = 3, delay = 1000) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        return response;
+                    }
+
+                    if (i < retries - 1) {
+                        await new Promise(resolve => setTimeout(resolve, delay * (2 ** i)));
+                    } else {
+                        throw new Error(`API failed after ${retries} attempts with status ${response.status}`);
+                    }
+                } catch (error) {
+                    if (i === retries - 1) {
+                        throw error;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, delay * (2 ** i)));
+                }
+            }
+        }
+
+        // Helper to convert base64 to ArrayBuffer
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // Helper to convert PCM data (from TTS API) into a playable WAV blob
+        function pcmToWav(pcm16, sampleRate = 24000) {
+            const numChannels = 1;
+            const numSamples = pcm16.length;
+            const dataLength = numSamples * 2; // 16-bit
+            const buffer = new ArrayBuffer(44 + dataLength);
+            const view = new DataView(buffer);
+            
+            // RIFF chunk
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + dataLength, true);
+            writeString(view, 8, 'WAVE');
+            
+            // FMT chunk
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // chunkSize
+            view.setUint16(20, 1, true);  // wFormatTag (PCM)
+            view.setUint32(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * numChannels * 2, true); // byteRate
+            view.setUint16(32, numChannels * 2, true); // blockAlign
+            view.setUint16(34, 16, true); // bitsPerSample
+            
+            // DATA chunk
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataLength, true);
+            
+            // PCM data
+            let offset = 44;
+            for (let i = 0; i < numSamples; i++) {
+                view.setInt16(offset, pcm16[i], true);
+                offset += 2;
+            }
+            
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        // --- TTS Feature (🗣️) ---
+        window.speakText = async function(text, button) {
+            button.disabled = true;
+            const originalIcon = button.innerHTML;
+            button.innerHTML = `<i data-lucide="volume-x" class="w-4 h-4 animate-pulse"></i>`;
+            if (typeof createIcons !== 'undefined') createIcons();
+
+            try {
+                // Ensure text is English for best TTS results
+                const systemPrompt = "Translate the following user text to English. Respond only with the translated English text and nothing else.";
+                const translationPayload = {
+                    contents: [{ parts: [{ text: text }] }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] }
+                };
+                
+                const translationResponse = await fetchWithBackoff(geminiFlashUrl, translationPayload);
+                const translationResult = await translationResponse.json();
+                const englishText = translationResult.candidates?.[0]?.content?.parts?.[0]?.text || text;
+
+                const ttsPayload = {
+                    contents: [{ parts: [{ text: englishText }] }],
+                    generationConfig: {
+                        responseModalities: ["AUDIO"],
+                        speechConfig: {
+                            voiceConfig: {
+                                prebuiltVoiceConfig: { voiceName: "Aoede" } // Breezy, engaging voice
+                            }
+                        }
+                    },
+                };
+
+                // FIX: Corregido el error de tipografía de 'fetchWithoff' a 'fetchWithBackoff'
+                const response = await fetchWithBackoff(geminiTtsUrl, ttsPayload);
+                const result = await response.json();
+                const part = result?.candidates?.[0]?.content?.parts?.[0];
+                const audioData = part?.inlineData?.data;
+                const mimeType = part?.inlineData?.mimeType;
+
+                if (audioData && mimeType && mimeType.startsWith("audio/")) {
+                    // Extract sample rate from mimeType (e.g., audio/L16;rate=24000)
+                    const rateMatch = mimeType.match(/rate=(\d+)/);
+                    const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+
+                    const pcmData = base64ToArrayBuffer(audioData);
+                    // API returns signed PCM16 audio data
+                    const pcm16 = new Int16Array(pcmData);
+                    const wavBlob = pcmToWav(pcm16, sampleRate);
+                    const audioUrl = URL.createObjectURL(wavBlob);
+                    
+                    const audio = new Audio(audioUrl);
+                    audio.play();
+
+                    audio.onended = () => {
+                        button.innerHTML = originalIcon;
+                        button.disabled = false;
+                        URL.revokeObjectURL(audioUrl);
+                        if (typeof createIcons !== 'undefined') createIcons();
+                    };
+
+                } else {
+                    console.error("TTS failed to generate audio or missing data.");
+                    // alert("TTS Error: Could not generate audio."); // Replaced with console log as per instruction
+                }
+
+            } catch (error) {
+                console.error("TTS API Error:", error);
+                // alert("TTS Error: Failed to generate audio."); // Replaced with console log as per instruction
+            } finally {
+                if (button.disabled) {
+                    button.innerHTML = originalIcon;
+                    button.disabled = false;
+                    if (typeof createIcons !== 'undefined') createIcons();
+                }
+            }
+        }
+
+        // --- Quiz Generation Feature (✨) ---
+        window.generateQuiz = async function() {
+            if (!isAuthReady) {
+                // alert("Please wait for the tutor to be ready (Auth not initialized)."); // Replaced with console log
+                console.log("Please wait for the tutor to be ready (Auth not initialized).");
+                return;
+            }
+            
+            // 1. Disable buttons and show loading
+            userInput.disabled = true;
+            sendButton.disabled = true;
+            quizButton.disabled = true;
+            loadingIndicator.classList.remove('hidden');
+
+            const quizPrompt = "Based on our recent conversation, generate a short 3-question quiz (mix of multiple choice, true/false, or fill-in-the-blank) to test understanding of the concepts discussed. Provide the correct answer for each question.";
+
+            // 2. Define the JSON schema for structured output
+            const quizSchema = {
+                type: "ARRAY",
+                description: "A list of questions for a language quiz.",
+                items: {
+                    type: "OBJECT",
+                    properties: {
+                        "question": { "type": "STRING", "description": "The question text." },
+                        "type": { "type": "STRING", "description": "The type of question.", "enum": ["multiple_choice", "fill_in_the_blank", "true_false"] },
+                        "options": { "type": "ARRAY", "items": { "type": "STRING" }, "description": "Options for multiple choice questions. Empty array for others." }, 
+                        "answer": { "type": "STRING", "description": "The correct answer to the question." }
+                    },
+                    required: ["question", "type", "answer"]
+                }
+            };
+
+            try {
+                // To create a contextual quiz, we need the last 10 messages from the DOM (approximation)
+                // Note: The listener already updates the DOM, so accessing the DOM is a reliable way to get context.
+                const allMessages = Array.from(chatHistory.children);
+                // Exclude the initial welcome message (first child)
+                const chatMessages = allMessages.slice(1); 
+                
+                // Get the text content, removing the 'Lazy Teacher' label for clean context
+                const context = chatMessages
+                    .slice(-10) // Get the last 10 relevant messages
+                    .map(msg => {
+                        const contentElement = msg.querySelector('p');
+                        return contentElement ? contentElement.textContent.trim() : '';
+                    })
+                    .filter(text => text.length > 0)
+                    .join('\n');
+                
+                if (!context || context.length < 50) {
+                     // Fallback context if not enough conversation history exists
+                     // The user will see a fallback message if the LLM cannot generate a quiz from this.
+                     console.log("Not enough conversation history for a detailed quiz. Using general context.");
+                }
+
+                const fullPrompt = `Context: ${context}\n\n${quizPrompt}`;
+                
+                const payload = {
+                    contents: [{ parts: [{ text: fullPrompt }] }],
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: quizSchema,
+                    },
+                    // No system instruction here, as we only need structured JSON output
+                };
+
+                const response = await fetchWithBackoff(geminiFlashUrl, payload);
+                const result = await response.json();
+
+                let quizData = null;
+                const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (jsonText) {
+                    try {
+                        quizData = JSON.parse(jsonText);
+                    } catch (e) {
+                        console.error("Failed to parse quiz JSON:", e);
+                        throw new Error("Received malformed quiz data.");
+                    }
+                }
+
+                if (quizData && Array.isArray(quizData) && quizData.length > 0) {
+                    // 3. Save and display the quiz data
+                    await saveMessage("Quiz generated successfully.", 'quiz', [], quizData);
+                } else {
+                    // Mensaje traducido
+                    await saveMessage("El generador de exámenes no pudo crear un examen basado en el historial de conversación. ¡Intenta preguntar sobre un tema gramatical específico primero!", 'ai');
+                }
+            } catch (error) {
+                console.error("Quiz Generation Error:", error);
+                await saveMessage("⚠️ Error al generar el examen. Intenta de nuevo. (Check console for details)", 'ai');
+            } finally {
+                // 4. Re-enable input and hide loading
+                userInput.disabled = false;
+                sendButton.disabled = false;
+                quizButton.disabled = false;
+                loadingIndicator.classList.add('hidden');
+                userInput.focus();
+            }
+        }
+
+        // --- Main Chat Function ---
+        window.sendMessage = async function() {
+            if (!isAuthReady) {
+                 // alert("Please wait for the tutor to be ready (Auth not initialized)."); // Replaced with console log
+                 console.log("Please wait for the tutor to be ready (Auth not initialized).");
+                 return;
+            }
+            
+            const userText = userInput.value.trim();
+            if (!userText) return;
+
+            // 1. Save and display user message
+            await saveMessage(userText, 'user');
+            userInput.value = '';
+            
+            // 2. Disable input and show loading
+            userInput.disabled = true;
+            sendButton.disabled = true;
+            quizButton.disabled = true;
+            loadingIndicator.classList.remove('hidden');
+
+            try {
+                // Reconstruct the payload for the standard conversational query
+                const payload = {
+                    contents: [{ parts: [{ text: userText }] }],
+                    tools: [{ "google_search": {} }], 
+                    systemInstruction: {
+                        parts: [{ text: LLM_SYSTEM_PROMPT }]
+                    },
+                };
+
+                const response = await fetchWithBackoff(geminiFlashUrl, payload);
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+
+                // Mensaje traducido
+                let aiResponseText = "Lo siento, tuve un problema. Por favor, inténtalo de nuevo.";
+                let sources = [];
+
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    aiResponseText = candidate.content.parts[0].text;
+                    
+                    // Extract grounding sources
+                    const groundingMetadata = candidate.groundingMetadata;
+                    // FIX: Corregida la referencia, debe ser 'groundingMetadata.groundingAttributions'
+                    if (groundingMetadata && groundingMetadata.groundingAttributions) { 
+                        sources = groundingMetadata.groundingAttributions
+                            .map(attribution => ({
+                                uri: attribution.web?.uri,
+                                title: attribution.web?.title || 'External Source',
+                            }))
+                            .filter(source => source.uri);
+                    }
+                }
+                
+                // 3. Save and display AI message
+                await saveMessage(aiResponseText, 'ai', sources);
+
+
+            } catch (error) {
+                console.error("Gemini API Error:", error);
+                // Mensaje traducido
+                await saveMessage("⚠️ Error del sistema: Error de conexión con el modelo. Por favor, revisa la consola.", 'ai');
+            } finally {
+                // 4. Re-enable input and hide loading
+                userInput.disabled = false;
+                sendButton.disabled = false;
+                quizButton.disabled = false;
+                loadingIndicator.classList.add('hidden');
+                userInput.focus();
+            }
+        }
+        
+        // Initial call to start the app
+        if (typeof createIcons !== 'undefined') createIcons();
+        initFirebase();
+    </script>
+</body>
+</html>
